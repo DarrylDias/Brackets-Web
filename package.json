@@ -1,0 +1,9 @@
+{
+  "name": "Brackets-Web",
+  "version": "0.0.0",
+  "description": "Brackets that runs in your web browers",
+  "dependencies": {
+    "brackets": "latest",
+    "connect": "latest"
+  }
+}

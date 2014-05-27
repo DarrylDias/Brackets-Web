@@ -1,0 +1,498 @@
+/*
+ * Copyright (c) 2012 Jochen Hagenstroem. All rights reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
+ *
+ */
+
+/*  texxt inlude  wih typos  makes  sense? tea is four  ecsclusieve mebmesr olny? */
+/*jslint vars: true, plusplus: true, devel: true, nomen: true, indent: 4, maxerr: 50 */
+/*global define, $, brackets, btoa, atob */
+
+
+/* select language from the env or detect language */
+
+define(function (require, exports, module) {
+    'use strict';
+
+
+    // Brackets modules
+    var CodeHintManager = brackets.getModule("editor/CodeHintManager"),
+        EditorManager   = brackets.getModule("editor/EditorManager"),
+        ExtensionUtils  = brackets.getModule("utils/ExtensionUtils"),
+        CommandManager  = brackets.getModule("command/CommandManager"),
+        Menus           = brackets.getModule("command/Menus"),
+        StringUtils     = brackets.getModule("utils/StringUtils"),
+        TokenUtils      = brackets.getModule("utils/TokenUtils"),
+        spellCheck      = require("AtD");
+    
+
+
+    var CHECK_SPELLING = "check_spelling";
+    var CHECK_SPELLING_DE = "check_spelling_de";
+    var CHECK_SPELLING_FR = "check_spelling_fr";
+    var CHECK_SPELLING_ES = "check_spelling_es";
+    var CHECK_SPELLING_PT = "check_spelling_pt";
+    
+    var activeSelection = "";
+    var atdResult;
+    var targetEditor;
+    var selelectionBoundary;
+    var textMarkers = [];
+    var wordErrorMap = [];
+    var lang = "en";
+    
+
+    
+    // -----------------------------------------
+    // Code Mirror integration
+    // -----------------------------------------
+    var _getActiveSelection = function () {
+        return EditorManager.getFocusedEditor().getSelectedText();
+    };
+
+    var _replaceActiveSelection = function (text) {
+        EditorManager.getFocusedEditor()._codeMirror.replaceSelection(text);
+    };
+    
+    function findWordBoundariesForCursor(editor, cursor, currentErr) {
+        // [\s$,\.\=\!-_#]
+        
+        // Try to use Editor.selectWordAt? - doesn't work as expected.
+        // var w = editor.selectWordAt(cursor);
+        var start = {line: -1, ch: -1},
+            end = {line: -1, ch: -1},
+            cm = editor._codeMirror,
+            token,
+            keepSearchingForWordStart = true,
+            keepSearchingForWordEnd = true,
+            prevToken,
+            match;
+
+        
+        end.line = start.line = cursor.line;
+        start.ch = cursor.ch;
+        end.ch = start.ch + 1;
+        token = cm.getRange(start, end);
+        
+        while (keepSearchingForWordStart) {
+            match = token.match(/[\s,\.\=\!#\?\-%&\*\+]\w/);
+            if (match) {
+                start.ch = start.ch + 1;
+                keepSearchingForWordStart = false;
+            } else {
+                start.ch = start.ch - 1;
+            }
+            prevToken = token;
+            token = cm.getRange(start, end);
+            if (prevToken.valueOf() === token.valueOf()) {
+                keepSearchingForWordStart = false;
+                start.ch = start.ch + 1;
+            }
+        }
+        match = null;
+        while (keepSearchingForWordEnd) {
+            if (currentErr === undefined) {
+                match = token.match(/\w[\s,\.\=\!#\?\-%&\*\+]/);
+            } else {
+                var key;
+                for (key in currentErr.pretoks) {
+                    if (currentErr.pretoks.hasOwnProperty(key)) {
+                        var i;
+                        for (i = 0; i < currentErr.pretoks[key].length; i++) {
+                            match = token.match(currentErr.pretoks[key][i].regexp);
+                            if (match) {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!match && currentErr.defaults !== undefined) {
+                    var j;
+                    for (j = 0; j < currentErr.defaults.length; j++) {
+                        match = token.match(currentErr.defaults[j].regexp);
+                        if (match) {
+                            break;
+                        }
+                    }
+                }
+            }
+            if (match) {
+                if (currentErr === undefined) {
+                    end.ch = end.ch - 1;
+                }
+                keepSearchingForWordEnd = false;
+            } else {
+                end.ch = end.ch + 1;
+            }
+            prevToken = token;
+            token = cm.getRange(start, end);
+            if (prevToken.valueOf() === token.valueOf()) {
+                keepSearchingForWordEnd = false;
+                // todo return invalid boundary if no good boundary was found                
+            }
+        }
+
+        return {start: start, end: end};
+    }
+    
+    // -----------------------------------------
+    // AtD result handler
+    // -----------------------------------------    
+    var resultHandler = [];
+    resultHandler.ready = function (count) {
+        //console.log("ready called: count " + count);
+    };
+    
+    resultHandler.success = function (count) {
+        //console.log("success called: count " + count);
+    };
+    
+    
+    resultHandler.markMyWords = function (results) {
+        atdResult = results;
+        var suggestionsMap = [];
+        // build map from suggestions
+        var i;
+        for (i = 0; i < atdResult.suggestions.length; i++) {
+            var string = atdResult.suggestions[i].string;
+            suggestionsMap[string] = atdResult.suggestions[i];
+        }
+
+        
+        //console.log(" markMyWords callled ");
+        $(targetEditor.getScrollerElement()).off('click', function (event) {
+            event.stopPropagation();
+            CodeHintManager.showHint(targetEditor);
+        });
+        
+        targetEditor = EditorManager.getCurrentFullEditor();
+        var cm = targetEditor._codeMirror;
+        var text = targetEditor.document.getText();
+
+        
+        selelectionBoundary = targetEditor.getSelection();
+        var selStart = targetEditor.indexFromPos(selelectionBoundary.start);
+
+        var wordCursor = [];
+        i = 0;
+        // todo mark repeat words correctly
+        var errorWord;
+        for (errorWord in atdResult.errors) {
+            if (atdResult.errors.hasOwnProperty(errorWord)) {
+                var markMore = true;
+                // todo update currentCurser in loop
+                while (markMore) {
+                    var error = atdResult.errors[errorWord];
+                    var wrongWord = true,
+                        boundaries,
+                        token,
+                        index,
+                        pWord = "",
+                        pToken = "",
+                        doMark = true;
+                    var word = errorWord.replace('__', '');
+                    console.log(word);
+                    var currentCursor = wordCursor[word];
+                    if (currentCursor === undefined) {
+                        currentCursor = selStart - 1;
+                    }
+                    index = text.indexOf(word, currentCursor + 1);
+                    if (index > 0) {
+                        boundaries = findWordBoundariesForCursor(targetEditor, cm.posFromIndex(index));
+                        token = cm.getRange(boundaries.start, boundaries.end);
+                        
+                        while (wrongWord) {
+                            index = text.indexOf(word, currentCursor + 1);
+                            var x = targetEditor.indexFromPos(selelectionBoundary.end);
+                            if (index < 0 || index > targetEditor.indexFromPos(selelectionBoundary.end)) {
+                                markMore = false;
+                                doMark = false;
+                                wrongWord = false;
+                            }
+                            if (index > 0 && index < targetEditor.indexFromPos(selelectionBoundary.end)) {
+                                boundaries = findWordBoundariesForCursor(targetEditor, cm.posFromIndex(index));
+                                token = cm.getRange(boundaries.start, boundaries.end);
+                                if (pToken === token && pWord === word) {
+                                    wrongWord = false;
+                                    wordCursor[word] = index;
+                                    doMark = false;
+                                    //console.log("bailing, cannot find the right word boundary to mark for word " + word);
+                                }
+                                if (token === word) {
+                                    wrongWord = false;
+                                    wordCursor[word] = index;
+                                } else {
+                                    pToken = token;
+                                    pWord = word;
+                                }
+                                currentCursor++;
+                            } else {
+                                wrongWord = false;
+                                //console.log("bailing, cannot find the word boundary to mark for word " + word);
+                            }
+                        }
+                        if (markMore && doMark) {
+    
+                            var cmPos = cm.posFromIndex(index);
+                            // highlight
+                            boundaries = findWordBoundariesForCursor(targetEditor, cmPos, error);
+                            token = cm.getRange(boundaries.start, boundaries.end);
+                            var wordTest = token.split(/\b/);
+                            //console.log("token test, token " + token + ", subtokens " + wordTest.length);
+                            if (wordTest.length < 5) {
+                                wordErrorMap[word] = error;
+                                textMarkers[i] = cm.markText(boundaries.start, {line: boundaries.start.line, ch: boundaries.start.ch + token.length}, "underline AtD_hints_available");
+                                i++;
+                                targetEditor.setCursorPos(cmPos.line, cmPos.ch + token.length - 1);
+                            }
+                        }
+                    } else {
+                        //console.log(" cannot find more instances of  " + word);  
+                        markMore = false;
+                    }
+    
+                }
+            }
+        }
+        $(targetEditor.getScrollerElement()).on('click', function (event) {
+            event.stopPropagation();
+            CodeHintManager.showHint(targetEditor);
+        });
+    };
+    
+    // -----------------------------------------
+    // initiate spell check
+    // -----------------------------------------  
+    var _check_spelling = function () {
+        if (lang === "en") {
+            spellCheck.AtD.rpc = 'http://service.afterthedeadline.com';
+        }
+        if (lang === "de") {
+            spellCheck.AtD.rpc = 'http://de.service.afterthedeadline.com';
+        }
+        if (lang === "fr") {
+            spellCheck.AtD.rpc = 'http://fr.service.afterthedeadline.com';
+        }
+        if (lang === "es") {
+            spellCheck.AtD.rpc = 'http://es.service.afterthedeadline.com';
+        }
+        if (lang === "pt") {
+            spellCheck.AtD.rpc = 'http://pt.service.afterthedeadline.com';
+        }
+
+        atdResult = null;
+        
+        selelectionBoundary = [];
+        wordErrorMap = [];
+        
+        var i;
+        for (i = 0; i < textMarkers.length; i++) {
+            if (textMarkers[i] !== undefined) {
+                textMarkers[i].clear();
+            }
+        }
+        textMarkers = [];
+        activeSelection = _getActiveSelection();
+        if (activeSelection !== undefined && activeSelection !== "") {
+            spellCheck.AtD.check(activeSelection, resultHandler);
+        } else {
+            var placeholder = 1;
+            // TODO check entire document, really? TBD
+        }
+        lang = "en";
+    };
+    
+    var _check_spelling_de = function () {
+        lang = "de";
+        _check_spelling();
+    };
+    var _check_spelling_fr = function () {
+        lang = "fr";
+        _check_spelling();
+    };
+    var _check_spelling_es = function () {
+        lang = "es";
+        _check_spelling();
+    };
+    var _check_spelling_pt = function () {
+        lang = "pt";
+        _check_spelling();
+    };
+    // -----------------------------------------
+    // brackets menu item
+    // ----------------------------------------- 
+    var buildMenu = function (m) {
+        m.addMenuDivider();
+        m.addMenuItem(CHECK_SPELLING);
+        // uncomment to add or switch language
+//        m.addMenuItem(CHECK_SPELLING_DE);
+//        m.addMenuItem(CHECK_SPELLING_FR);
+//        m.addMenuItem(CHECK_SPELLING_ES);
+//        m.addMenuItem(CHECK_SPELLING_PT);
+    };
+    
+    CommandManager.register("Check Spelling - English", CHECK_SPELLING, _check_spelling);
+    
+    CommandManager.register("Check Spelling - Deutsch", CHECK_SPELLING_DE, _check_spelling_de);
+    
+    CommandManager.register("Check Spelling - Français", CHECK_SPELLING_FR, _check_spelling_fr);
+    
+    CommandManager.register("Check Spelling - Español", CHECK_SPELLING_ES, _check_spelling_es);
+
+    CommandManager.register("Check Spelling - Português", CHECK_SPELLING_PT, _check_spelling_pt);
+
+
+    var menu = Menus.getMenu(Menus.AppMenuBar.EDIT_MENU);
+    buildMenu(menu);
+
+    var contextMenu = Menus.getContextMenu(Menus.ContextMenuIds.EDITOR_MENU);
+    buildMenu(contextMenu);
+    
+    // -----------------------------------------
+    // Hint Provider for CodeHintmanager
+    // -----------------------------------------
+    /**
+     * Registers as HintProvider as an object that is able to provide code hints. 
+     * When the user requests a spelling
+     * hint getQueryInfo() will be called. getQueryInfo() returns a search query 
+     * object with a filter string if hints can be provided. 
+     * search() will then be called  to create a 
+     * list of hints for the search query. When the user chooses a hint handleSelect() is called
+     * so that the hint provider can insert the hint into the editor.
+     *
+     */
+    function SpellingHints() {}
+
+    /**
+     * Get the spelling hints for a given word
+     * @param {Object.<queryStr: string, ...} query -- a query object with a required property queryStr 
+     *     that will be used to filter out code hints
+     * @return {Array.<string>}
+     */
+    SpellingHints.prototype.search = function (query) {
+
+        var i,
+            returnObject = [],
+            suggestionsAdded = [];
+        if (query.queryStr !== "") {
+            for (i = 0; i < atdResult.suggestions.length; i++) {
+                var suggestion = atdResult.suggestions[i];
+                
+                if (query.queryStr.match(suggestion.matcher) ||
+                        suggestion.string.indexOf(query.queryStr) !== -1) {
+                    var j;
+                    for (j = 0; j < suggestion.suggestions.length; j++) {
+                        // TODO check if suggestion is available already
+                        if (!suggestionsAdded[suggestion.suggestions[j]]) {
+                            returnObject.push(suggestion.suggestions[j]);
+                        }
+                        suggestionsAdded[suggestion.suggestions[j]] = true;
+    
+                    }
+                }
+            }
+            var currentErr  = atdResult.errors['__' + query.queryStr];
+            if (currentErr !== undefined && currentErr.pretoks && returnObject.length === 0) {
+                returnObject.push("No suggestions available");
+            }
+        }
+        return returnObject;
+    };
+    
+    /**
+     * Figures out the text to use for the hint list query based on the text
+     * around the cursor
+     * Query is the text from the start of a tag to the current cursor position
+     * @param {Editor} editor
+     * @param {Cursor} current cursor location
+     * @return {Object.<queryStr: string, ...} search query results will be filtered by.
+     *      Return empty queryStr string to indicate code hinting should not filter and show all results.
+     *      Return null in queryStr to indicate NO hints can be provided.
+     */
+    SpellingHints.prototype.getQueryInfo = function (editor, cursor) {
+        var boundaries = findWordBoundariesForCursor(editor, cursor),
+            cm = editor._codeMirror,
+            token;
+        
+        if (cm.indexFromPos(selelectionBoundary.start) <= cm.indexFromPos(boundaries.start) &&
+                cm.indexFromPos(selelectionBoundary.end) >= cm.indexFromPos(boundaries.end) - 1
+                ) {
+            // only return query if word at cursor is in selection
+            // else make placebo query
+            token = cm.getRange(boundaries.start, boundaries.end);
+        } else {
+            token = "";
+        }
+
+        return {queryStr: token};
+    };
+    
+    /**
+     * Enters the code completion text into the editor
+     * @param {string} completion - text to insert into current code editor
+     * @param {Editor} editor
+     * @param {Cursor} current cursor location
+     * @param {boolean} closeHints - true to close hints, or false to continue hinting
+     */
+    SpellingHints.prototype.handleSelect = function (completion, editor, cursor, closeHints) {
+        var savedCursor = cursor;
+        var boundaries = findWordBoundariesForCursor(editor, cursor);
+        var cm = editor._codeMirror;
+        var word = cm.getRange(boundaries.start, boundaries.end);
+        var error = wordErrorMap[word];
+        if (error !== undefined) {
+            boundaries = findWordBoundariesForCursor(editor, cursor, error);
+        }
+        if (boundaries.start.ch !== boundaries.end.ch) {
+            editor.document.replaceRange(completion, boundaries.start, boundaries.end);
+        } else {
+            editor.document.replaceRange(completion, boundaries.start);
+        }
+
+    };
+
+    
+    /**
+     * Check whether to show hints on a specific key.
+     * @param {string} key -- the character for the key user just presses.
+     * @return {boolean} return true/false to indicate whether hinting should be triggered by this key.
+     */
+    SpellingHints.prototype.shouldShowHintsOnKey = function (key) {
+        return false;
+    };
+
+    var spellingHints = new SpellingHints();
+    CodeHintManager.registerHintProvider(spellingHints);
+    
+    // -----------------------------------------
+    // Init
+    // -----------------------------------------
+    function init() {
+        ExtensionUtils.loadStyleSheet(module, "styles.css");
+        targetEditor = EditorManager.getCurrentFullEditor();
+        atdResult = null;
+        textMarkers = [];
+        selelectionBoundary = [];
+        wordErrorMap = [];
+    }
+    
+    init();
+    
+});
