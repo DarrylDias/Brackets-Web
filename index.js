@@ -7,7 +7,7 @@ var port = 3000;
 connect()
 .use('/brackets', brackets())
 .use(function (request, response) {
-res.end('Hello World');
+response.end('Hello World');
 }).listen(port, host);
 
 console.log("\n Starting... \n");
