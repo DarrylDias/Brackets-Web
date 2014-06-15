@@ -1,8 +1,8 @@
-var connect = require('connect'),
+var connect = require('connect'), 
 brackets    = require('brackets');
 
-var host = "127.0.0.1";
-var port = 3000;
+var host = "127.0.0.1"; // Set 0.0.0.0 to run on public ip
+var port = 3000; // Change the port to what ever you prefer
 
 connect()
 .use('/brackets', brackets())
