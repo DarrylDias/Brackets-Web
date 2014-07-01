@@ -7,7 +7,7 @@ var port = 3000; // Change the port to what ever you prefer
 connect()
 .use('/brackets', brackets())
 .use(function (request, response) {
-response.end('Hello World');
+response.end('Visit /brackets to see the editor in action');
 }).listen(port, host);
 
 console.log("\n Starting... \n");
